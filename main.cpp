@@ -1,23 +1,18 @@
 #include<bits/stdc++.h>
 #include "picosha2.h"
 #include "bch_codec.h"
+#include "bch_codec.c"
+#include "qot.hpp"
+#include "NetIO.hpp"
 using namespace std;
 
+int party,port;
+NetIO *io;
 
-
-struct Qubit{
-    int id;
-    bool basis;
-    bool value;
-};
-
-vector<Qubit>alice,bob;
-
-
-
+ 
 void sim(int n,vector<Qubit>&alice,vector<Qubit>&bob){
     alice.clear();
-    bob.clear();
+    bob.clear(); 
 
     for(int i=1;i<=n;i++){
         Qubit qb;
@@ -33,9 +28,9 @@ void sim(int n,vector<Qubit>&alice,vector<Qubit>&bob){
 
             //adding noisy
 
-            //if(rand()%100<2){
-            //    qb2.value^=1;
-            //}
+            if(rand()%100<2){
+                qb2.value^=1;
+            }
 
         }else{
             qb2.value=rand()%2;
@@ -46,260 +41,253 @@ void sim(int n,vector<Qubit>&alice,vector<Qubit>&bob){
 }
 
 
-struct Com{
-    vector<unsigned char>hash;
-};
-struct Decom{
-    string s;
-    string r;
-};
 
-Com Commit(Decom &de){
-    for(int i=0;i<128;i++)
-        de.r+=rand()%2; //TODO: crypto random 
-    string info=de.s+de.r;
-    std::vector<unsigned char> hash(picosha2::k_digest_size);
-    picosha2::hash256(info.begin(), info.end(), hash.begin(), hash.end());
-    Com com;
-    com.hash=hash;
-    return com;
-}
-bool Open(Com com,Decom de){
-    string info=de.s+de.r;
-    std::vector<unsigned char> hash(picosha2::k_digest_size);
-    picosha2::hash256(info.begin(), info.end(), hash.begin(), hash.end());
-    return com.hash==hash;
-}
+vector<unsigned char> QOT(int party,NetIO *io,vector<Qubit>&qubits,int length,vector<unsigned char>message[2],bool b){
 
+    int n=8*512;
 
-void QOT(int party,vector<Qubit>&alice,vector<Qubit>&bob,string message[2],bool b,string &ret){
-    int n=min(alice.size(),bob.size());
     vector<Com>coms;
     vector<Decom>decoms;
+    vector<unsigned char>chck; 
+    if(party==BOB){
+     
+        for(int i=0;i<n;i++){
+            Decom d;
+            d.s[0]=qubits[i].basis;
+            d.s[1]=qubits[i].value;
+            Com com;
+            com=Commit(d);
+            coms.push_back(com);
+            decoms.push_back(d);
+        }
+        for(int i=0;i<n;i++){
+            io->send_data(coms[i].hash.data(),coms[i].hash.size());
+        }
+        io->flush();
 
-    for(int i=0;i<n;i++){
-        Decom d;
-        d.s+=(char)bob[i].basis;
-        d.s+=(char)bob[i].value;
-        Com com;
-        com=Commit(d);
-        coms.push_back(com);
-        decoms.push_back(d);
+    }else{
+        coms.resize(n);
+        for(int i=0;i<n;i++){
+            coms[i].hash.resize(picosha2::k_digest_size);
+            io->recv_data(coms[i].hash.data(),coms[i].hash.size());
+        }
+
+    
+        for(int i=0;i<n;i++)
+            chck.push_back(rand()%2);//TODO crypto random
+        
+        io->send_data(chck.data(),chck.size());
+        io->flush();
     }
 
-    
-    vector<bool>chck;
-    for(int i=0;i<n;i++)
-        chck.push_back(rand()%2);
-    
+    if(party==BOB){
+        chck.resize(n);
+        io->recv_data(chck.data(),chck.size());
+
+    }
+ 
+
     int all=0,yes=0;
     for(int i=0;i<n;i++){
         if(!chck[i])continue;
-        if(alice[i].basis==bob[i].basis){
+
+        Qubit qb;
+        Decom decom;
+
+        if(party==ALICE){
+            io->recv_data(&decom,sizeof(decom));
+            qb.basis=decom.s[0];
+            qb.value=decom.s[1];
+        }else{
+            decom=decoms[i];
+            io->send_data(&decom,sizeof(decom));
+            io->flush();
+        }
+
+        if(!Open(coms[i],decom)){
+            fprintf(stderr,"Commit Fail!!");
+        }
+
+        if(qubits[i].basis==qb.basis){
             all++;
-            if(!Open(coms[i],decoms[i])){
-                fprintf(stderr,"Commit Fail!!");
-            }
-            if(alice[i].value==bob[i].value)
-                yes++;
+            if(qubits[i].value==qb.value)
+                 yes++;
         }
     }
+ 
 
-    cerr<<yes<<"/"<<all<<endl;
-    if(yes>=all*0.99){
-        fprintf(stderr,"Check Pass\n");
-    }else{
-        fprintf(stderr,"Check Fail\n");
+    if(party==ALICE){
+        cerr<<yes<<"/"<<all<<endl;
+        if(yes>=all*0.95){
+            fprintf(stderr,"Check Pass\n");
+        }else{
+            fprintf(stderr,"Check Fail\n");
+            exit(-1);
+        }
     }
+   
 
-    vector<Qubit>rest_alice;
-    vector<Qubit>rest_bob;
-
-
-    vector<bool>basis;
-    vector<int>I[2];
-
+    vector<Qubit>rest;
+    vector<unsigned char>basis;
     for(int i=0;i<n;i++){
         if(!chck[i]){
-            rest_alice.push_back(alice[i]);
-            rest_bob.push_back(bob[i]);
-
-            basis.push_back(alice[i].basis);
+            rest.push_back(qubits[i]);
+            basis.push_back(qubits[i].basis);
         }
     }
-    int m=rest_alice.size();
+    qubits=rest;
+    n=qubits.size();
+
+    
     //alice sending basis
-
-    for(int i=0;i<m;i++){
-        int d= basis[i]==rest_bob[i].basis?1:0;
-        I[d].push_back(i);
+    if(party==ALICE){
+        io->send_data(basis.data(),basis.size());
+        io->flush();
+    }else{
+        io->recv_data(basis.data(),basis.size());
     }
+    
 
-    cerr<<I[0].size()<<" "<<I[1].size()<<endl;
+    vector<unsigned char>I;
 
-
-    for(int i=0;i<10;i++){
-        if(rest_alice[I[1][i]].value==rest_bob[I[1][i]].value){
-
-        }else{
-            cerr<<"NO!!"<<endl;
-        }
-    }
-
-    if(!b){
-        swap(I[0],I[1]);
+    for(int i=0;i<n;i++){
+        int d= basis[i]==qubits[i].basis?1:0;
+        if(b==1)
+            I.push_back(d);
+        else
+            I.push_back(d^1);
     }
 
     //send I[2]
-    for(int i=0;i<2;i++){
-        if(message[i].length()>I[i].size()){
-            fprintf(stderr,"length is not enough\n");
-        }
-        for(int j=0;j<message[i].length();j++){
-            message[i][j]^=rest_alice[I[i][j]].value;
-        }
-    }
 
-    //send message'
-
-
-    for(int i=0;i<2;i++){
-        for(int j=0;j<message[i].length();j++){
-            message[i][j]^=rest_bob[I[i][j]].value;
-        }
-    }
-
-
-    cout<<message[0]<<endl;
-    cout<<message[1]<<endl;
-
-    ret=message[b];
-}
-
-char to_hex_ch(unsigned char hex_val)
-{
-  if (hex_val >= 0 && hex_val <= 9)
-    return char(hex_val + '0');
-  else
-    return char(hex_val - 10) + 'A';
-}
-
-std::string dec_to_hex(unsigned int dec)
-{
-  std::string hex = "";
-  if (dec == 0)
-    hex = "0";
-
-  while (dec != 0)
-  {
-    unsigned int hex_val = dec % 16;
-    hex = to_hex_ch(hex_val) + hex;
-    dec /= 16;
-  }
-  return hex;
-}
-
-bool out=false;
-int all=0;
-
-
-vector<Qubit> read_frame(ifstream &fin){
-    int cnt=0;
-    unsigned char tmp[4096];
-    fin.read((char*)tmp,8);
-   
-    if(tmp[0]==0xA0 && tmp[1]==0xA1 && tmp[2]==0xA2 && tmp[3]==0xA3){
-        
+    if(party==BOB){
+        io->send_data(I.data(),I.size());
+        io->flush();
     }else{
-        
+        io->recv_data(I.data(),I.size());
     }
- 
-    int length=(1*tmp[4]<<8) | tmp[5];
-    length=(length-3)/2;
-    fin.read((char*)tmp,4);
-    all++;
-    if(length>100){
-        exit(0);
+
+    vector<unsigned char>bits[2];
+
+    for(int i=0;i<n;i++){
+        bits[I[i]].push_back(qubits[i].value);
     }
-    int h=0;
-    vector<Qubit>qubits;
-    for(int i=0;i<length;i++){
-        fin.read((char*)tmp,4);
-        h=h*233+tmp[1];
-        //if(out)
-        ///    cout<<cnt<<" "<<dec_to_hex(tmp[0])<<" "<<dec_to_hex(tmp[1])<<" "<<dec_to_hex(tmp[2])<<" "<<dec_to_hex(tmp[3])<<endl;
-        Qubit qb;
-        qb.basis=tmp[3]/2%2;
-        qb.value=tmp[3]%2;
-        qubits.push_back(qb);
+    cerr<<bits[0].size()<<endl;
+    cerr<<bits[1].size()<<endl;
+
+
+    const int m=9,t=55;
+    bch_control * bch = init_bch(m,t,0);
+    int N = (1<<m)-1;
+    int msgBits = N - bch->ecc_bits;
+    if(length>msgBits){
+        cerr<<"NO! msg too long!"<<endl;
     }
-    fin.read((char*)tmp,6);
-    return qubits;
-}
-void parse(string file){
-    ifstream fin(file,ios::in|ios::binary);
-    
-}
+    cerr<<"BCH parameter "<<N<<" "<<msgBits<<" "<<t<<endl;
+      
+    vector<unsigned char >data;
+    data.resize(N);  
 
-int main(){
-
-
-    
-    ifstream ain("./rawkey/alice/key.bin",ios::in|ios::binary);
-    ifstream bin("./rawkey/bob/key.bin",ios::in|ios::binary);
-
-
-    int cnt=0;
-
-    int cnt_same_basis=0;
-    int cnt_diff_basis=0;
-
-    int cnt_same_same=0;
-    int cnt_diff_same=0;
-
-    for(int j=1;j<=100000;j++){
-        cout<<j<<endl;
-        puts("A---------");
-        auto vec1=read_frame(ain);//1318325
-        puts("B---------"); 
-        auto vec2=read_frame(bin);
-
-        assert(vec1.size()==vec2.size());
-        for(int i=0;i<vec1.size();i++){
-            Qubit qb1=vec1[i];
-            Qubit qb2=vec2[i];
-            if(qb1.basis==qb2.basis){
-                cnt_same_basis++;
-                if(qb1.value==qb2.value)
-                    cnt_same_same++;
-            }else{
-                cnt_diff_basis++;
-                if(qb1.value==qb2.value)
-                    cnt_diff_same++;    
+    if(party==ALICE){
+        for(int j=0;j<2;j++){
+            if(bits[j].size()<N){
+                fprintf(stderr,"qubits not enough");
+                exit(-1);
             }
+            for(int i=0;i<msgBits;i++)
+                data[i]=rand()%2; //TODO
+            //vector<unsigned char> ecc(bch->ecc_bits);
+            
+            for(int i=0;i<length;i++){
+                message[j][i]^=data[i]; //TODO Encryption
+            }
+
+            encodebits_bch(bch,&data[0],&data[msgBits]);
+            for(int i=0;i<N;i++)
+                data[i]^=bits[j][i];
+            io->send_data(data.data(),data.size());
+            io->send_data(message[j].data(),message[j].size());
+            
+            io->flush();
         }
-        printf("cnt same basis:%d\n",cnt_same_basis);
-        printf("cnt diff basis:%d\n",cnt_diff_basis);
-
-        printf("cnt same basis same value:%d/%d\n",cnt_same_same,cnt_same_basis);
-        printf("cnt diff basis same value:%d/%d\n",cnt_diff_same,cnt_diff_basis);
-
+    }else{
+    
+        for(int j=0;j<2;j++){
+            if(bits[j].size()<N){
+                fprintf(stderr,"qubits not enough");
+                exit(-1);
+            }
+            io->recv_data(data.data(),N);
+            for(int i=0;i<N;i++)
+                data[i]^=bits[j][i];
+            vector<unsigned int> errLocOut(t);
+            int nerrFound = decodebits_bch(bch, &data[0], &data[msgBits], &errLocOut[0]);
+            correctbits_bch(bch,&data[0],&errLocOut[0],nerrFound);
+            message[j].resize(length);
+            io->recv_data(message[j].data(),message[j].size()); 
+            for(int i=0;i<length;i++){
+                message[j][i]^=data[i]; //TODO Encryption
+            }
+            
+        }
     }
-    return 0;
+
+    if(party==BOB){
+        for(auto x:message[b^1])
+            printf("%d ",x);
+        puts("");
+    }
+
+    free_bch(bch);
+    return message[b];
+}
 
 
-    srand(time(0));
-    string m[2];
-    m[0]="1111111111111";
-    m[1]="0000000000000";
 
-    bool b=0;
+int main(int argc,char **argv){
 
-    sim(200,alice,bob);
+    if(argc<3){
+        puts("./main <party> <port>");
+        return 0;
+    }
+    sscanf(argv[1],"%d",&party);
+    sscanf(argv[2],"%d",&port);
 
-    string ret;
-    QOT(0,alice,bob,m,b,ret);
-    cout<<ret<<endl;
+    cerr<<port<<" "<<party<<endl;
+    io=new NetIO(party==ALICE?NULL:"127.0.0.1",port);
+
+    
+    ifstream fin(party==ALICE ? "./rawkey/alice/key.bin" : "./rawkey/bob/key.bin",ios::in|ios::binary);
+
+
+
+int T=10;
+while(T--){
+//    srand(123+T);
+//    sim(5000,alice,bob);
+
+
+//    vector<Qubit>qubits= party==ALICE? alice : bob;
+    vector<Qubit>qubits= get_qubits(5000,fin);
+//    cout<<qubits.size()<<endl;
+//return 0;
+    vector<unsigned char>message[2];
+    for(int i=0;i<10;i++){
+        message[0].push_back(1);
+        message[1].push_back(i&1);
+    }
+
+    bool b=0; 
+
+    auto vec=QOT(party,io,qubits,message[0].size(),message,b);
+    
+    if(party==BOB){
+        for(auto x:vec)
+            printf("%d ",x);
+        puts("");
+    }
+    
+}
 
     return 0;
 }
